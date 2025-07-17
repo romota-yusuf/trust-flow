@@ -168,3 +168,93 @@
       (try! (stx-transfer? amount sender (as-contract tx-sender)))
       ;; Update loan status
       (let ((new-repaid-amount (+ (get repaid-amount loan) amount)))
+      (map-set Loans { loan-id: loan-id }
+          (merge loan {
+            repaid-amount: new-repaid-amount,
+            is-active: (< new-repaid-amount total-due),
+          })
+        )
+        ;; Handle full repayment
+        (if (>= new-repaid-amount total-due)
+          (begin
+            (try! (update-credit-score sender true loan))
+            (as-contract (try! (stx-transfer? (get collateral loan) tx-sender sender)))
+            (var-set total-stx-locked
+              (- (var-get total-stx-locked) (get collateral loan))
+            )
+          )
+          true
+        )
+        (ok true)
+      )
+    )
+  )
+)
+
+;; PRIVATE HELPER FUNCTIONS
+
+;; Calculate Risk-Adjusted Collateral Requirements
+;; Higher credit scores require lower collateral ratios
+(define-private (calculate-required-collateral
+    (amount uint)
+    (score uint)
+  )
+  (let ((collateral-ratio (- u100 (/ (* score u50) u100))))
+    (/ (* amount collateral-ratio) u100)
+  )
+)
+
+;; Calculate Credit-Based Interest Rate
+;; Higher credit scores receive preferential rates
+(define-private (calculate-interest-rate (score uint))
+  (let ((base-rate u10))
+    (- base-rate (/ (* score u5) u100))
+  )
+)
+
+;; Calculate Total Amount Due
+;; Computes principal plus accrued interest
+(define-private (calculate-total-due (loan {
+  borrower: principal,
+  amount: uint,
+  collateral: uint,
+  due-height: uint,
+  interest-rate: uint,
+  is-active: bool,
+  is-defaulted: bool,
+  repaid-amount: uint,
+}))
+  (let ((interest (* (get amount loan) (get interest-rate loan))))
+    (+ (get amount loan) (/ interest u100))
+  )
+)
+
+;; Update User Credit Score
+;; Adjusts credit score based on repayment behavior
+(define-private (update-credit-score
+    (user principal)
+    (success bool)
+    (loan {
+      borrower: principal,
+      amount: uint,
+      collateral: uint,
+      due-height: uint,
+      interest-rate: uint,
+      is-active: bool,
+      is-defaulted: bool,
+      repaid-amount: uint,
+    })
+  )
+  (let (
+      (current-score (unwrap! (map-get? UserScores { user: user }) ERR-UNAUTHORIZED))
+      (new-score (if success
+        (if (<= (+ (get score current-score) u2) MAX-SCORE)
+          (+ (get score current-score) u2)
+          MAX-SCORE
+        )
+        (if (>= (- (get score current-score) u10) MIN-SCORE)
+          (- (get score current-score) u10)
+          MIN-SCORE
+        )
+      ))
+    )
